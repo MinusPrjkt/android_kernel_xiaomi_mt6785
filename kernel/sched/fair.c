@@ -11382,8 +11382,7 @@ static int idle_balance(struct rq *this_rq, struct rq_flags *rf)
 	sd = rcu_dereference_check_sched_domain(this_rq->sd);
 
 	overload = READ_ONCE(this_rq->rd->overload);
-	if (this_rq->avg_idle < sysctl_sched_migration_cost ||
-	    !overload ||
+	if (!overload ||
 	    (sd && this_rq->avg_idle < sd->max_newidle_lb_cost)) {
 
 		if (sd)
