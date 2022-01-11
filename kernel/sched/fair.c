@@ -3586,6 +3586,7 @@ update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
 		r = removed_util;
 		sub_positive(&sa->util_avg, r);
 		sub_positive(&sa->util_sum, r * divider);
+		sa->util_sum = max_t(u32, sa->util_sum, sa->util_avg * (LOAD_AVG_MAX - 1024));
 
 		add_tg_cfs_propagate(cfs_rq, -(long)removed_runnable_sum);
 
