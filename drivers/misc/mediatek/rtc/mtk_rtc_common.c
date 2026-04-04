@@ -880,6 +880,7 @@ static int rtc_get_boot_mode(void)
 	struct device_node *np = NULL;
 	struct device_node *boot_node = NULL;
 	struct tag_bootmode *tag = NULL;
+	int ret = 0;
 
 	bootmode = 0;
 	np = of_find_node_by_name(NULL, "mt6357_rtc");
@@ -891,20 +892,26 @@ static int rtc_get_boot_mode(void)
 	boot_node = of_parse_phandle(np, "bootmode", 0);
 	if (!boot_node) {
 		rtc_xinfo("%s: failed to get boot mode phandle\n", __func__);
-		return -ENXIO;
+		ret = -ENXIO;
+		goto out_put_np;
 	}
 
 	tag = (struct tag_bootmode *)of_get_property(boot_node, "atag,boot", NULL);
 	if (!tag) {
 		rtc_xinfo("%s: failed to get atag,boot\n", __func__);
-		return -ENXIO;
+		ret = -ENXIO;
+		goto out_put_nodes;
 	}
 
 	bootmode = tag->bootmode;
 
 	rtc_xinfo("%s: bootmode:%u\n", __func__, bootmode);
 
-	return 0;
+out_put_nodes:
+	of_node_put(boot_node);
+out_put_np:
+	of_node_put(np);
+	return ret;
 }
 
 static const struct rtc_class_ops rtc_ops = {

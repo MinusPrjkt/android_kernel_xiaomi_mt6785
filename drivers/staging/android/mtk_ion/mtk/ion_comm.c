@@ -53,11 +53,14 @@ static int ion_comm_cache_pool(void *data)
 		}
 
 		ret = wait_event_interruptible(ion_comm_wq,
-					       atomic_read(&ion_comm_event));
+					       atomic_read(&ion_comm_event) ||
+					       kthread_should_stop());
 		if (ret) {
 			IONMSG("%s wait event error:%d\n", __func__, ret);
 			continue;
 		}
+		if (kthread_should_stop())
+			break;
 		req_cache_size = atomic_read(&ion_comm_event);
 		cache_buffer = atomic_read(&ion_comm_cache_event);
 		atomic_set(&ion_comm_event, 0);
@@ -123,6 +126,16 @@ int ion_comm_init(void)
 	wake_up_process(ion_comm_kthread);
 
 	return 0;
+}
+
+void ion_comm_exit(void)
+{
+	if (IS_ERR_OR_NULL(ion_comm_kthread))
+		return;
+
+	wake_up_interruptible(&ion_comm_wq);
+	kthread_stop(ion_comm_kthread);
+	ion_comm_kthread = NULL;
 }
 
 void ion_comm_event_notify(bool cache, size_t len)

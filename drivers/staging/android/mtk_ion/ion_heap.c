@@ -269,7 +269,10 @@ static int ion_heap_deferred_free(void *data)
 		struct ion_buffer *buffer;
 
 		wait_event_freezable(heap->waitqueue,
-				     ion_heap_freelist_size(heap) > 0);
+				     ion_heap_freelist_size(heap) > 0 ||
+				     kthread_should_stop());
+		if (kthread_should_stop())
+			break;
 
 		spin_lock(&heap->free_lock);
 		if (list_empty(&heap->free_list)) {
@@ -302,6 +305,25 @@ int ion_heap_init_deferred_free(struct ion_heap *heap)
 	}
 	sched_setscheduler(heap->task, SCHED_NORMAL, &param);
 	return 0;
+}
+
+void ion_heap_cleanup(struct ion_heap *heap)
+{
+	if ((heap->flags & ION_HEAP_FLAG_DEFER_FREE) &&
+	    !IS_ERR_OR_NULL(heap->task)) {
+		wake_up(&heap->waitqueue);
+		kthread_stop(heap->task);
+		heap->task = NULL;
+	}
+
+	if (heap->shrinker.count_objects && heap->shrinker.scan_objects) {
+		unregister_shrinker(&heap->shrinker);
+		heap->shrinker.count_objects = NULL;
+		heap->shrinker.scan_objects = NULL;
+	}
+
+	if (heap->flags & ION_HEAP_FLAG_DEFER_FREE)
+		ion_heap_freelist_drain(heap, 0);
 }
 
 static unsigned long ion_heap_shrink_count(struct shrinker *shrinker,

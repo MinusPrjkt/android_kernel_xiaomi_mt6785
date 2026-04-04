@@ -752,6 +752,7 @@ static irqreturn_t mtk_rtc_irq_handler(int irq, void *data)
 				boot_mode = tag->bootmode;
 		}
 	}
+	of_node_put(boot_node);
 
 	spin_lock_irqsave(&mt_rtc->lock, flags);
 
@@ -1167,7 +1168,7 @@ static int mtk_rtc_pdrv_probe(struct platform_device *pdev)
 	if (ret) {
 		dev_dbg(&pdev->dev, "Failed to request alarm IRQ: %d: %d\n",
 			rtc->irq, ret);
-		goto out_dispose_irq;
+		goto out_cleanup_pm;
 	}
 
 	device_init_wakeup(&pdev->dev, 1);
@@ -1195,7 +1196,18 @@ static int mtk_rtc_pdrv_probe(struct platform_device *pdev)
 #endif
 	return 0;
 out_free_irq:
-	free_irq(rtc->irq, rtc->rtc_dev);
+	free_irq(rtc->irq, rtc);
+out_cleanup_pm:
+#ifdef CONFIG_PM
+	if (rtc_pm_notifier_registered) {
+		unregister_pm_notifier(&rtc_pm_notifier_func);
+		rtc_pm_notifier_registered = false;
+	}
+#endif /* CONFIG_PM */
+	if (mt6358_rtc_suspend_lock) {
+		wakeup_source_unregister(mt6358_rtc_suspend_lock);
+		mt6358_rtc_suspend_lock = NULL;
+	}
 out_dispose_irq:
 	irq_dispose_mapping(rtc->irq);
 	return ret;
@@ -1205,6 +1217,19 @@ static int mtk_rtc_pdrv_remove(struct platform_device *pdev)
 {
 	struct mt6358_rtc *rtc = platform_get_drvdata(pdev);
 
+#ifdef CONFIG_PM
+	if (rtc_pm_notifier_registered) {
+		unregister_pm_notifier(&rtc_pm_notifier_func);
+		rtc_pm_notifier_registered = false;
+	}
+#endif /* CONFIG_PM */
+	free_irq(rtc->irq, rtc);
+	irq_dispose_mapping(rtc->irq);
+	cancel_work_sync(&rtc->work);
+	if (mt6358_rtc_suspend_lock) {
+		wakeup_source_unregister(mt6358_rtc_suspend_lock);
+		mt6358_rtc_suspend_lock = NULL;
+	}
 	rtc_device_unregister(rtc->rtc_dev);
 
 	return 0;

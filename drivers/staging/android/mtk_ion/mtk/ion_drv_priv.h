@@ -18,6 +18,7 @@ void smp_inner_dcache_flush_all(void);
 
 #ifdef ION_HISTORY_RECORD
 int ion_history_init(void);
+void ion_history_exit(void);
 void ion_history_count_kick(bool allc, size_t len);
 #else
 static inline int ion_history_init(void)
@@ -47,6 +48,7 @@ void ion_mm_heap_cache_free(struct ion_buffer *buffer);
 int ion_mm_heap_pool_size(struct ion_heap *heap, gfp_t gfp_mask, bool cache);
 
 int ion_comm_init(void);
+void ion_comm_exit(void);
 void ion_comm_event_notify(bool allc, size_t len);
 #ifdef CONFIG_PM
 void shrink_ion_by_scenario(int need_lock);

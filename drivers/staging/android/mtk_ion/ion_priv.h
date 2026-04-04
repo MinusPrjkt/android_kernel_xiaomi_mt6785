@@ -361,6 +361,7 @@ void ion_heap_init_shrinker(struct ion_heap *heap);
  * return immediately and the actual free will occur some time later
  */
 int ion_heap_init_deferred_free(struct ion_heap *heap);
+void ion_heap_cleanup(struct ion_heap *heap);
 
 /**
  * ion_heap_freelist_add - add a buffer to the deferred free list

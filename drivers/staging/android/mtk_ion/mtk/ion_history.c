@@ -692,11 +692,14 @@ static int ion_history_record(void *data)
 		}
 
 		ret = wait_event_interruptible(ion_history_wq,
-					       atomic_read(&ion_history_event));
+					       atomic_read(&ion_history_event) ||
+					       kthread_should_stop());
 		if (ret) {
 			IONMSG("%s wait event error:%d\n", __func__, ret);
 			continue;
 		}
+		if (kthread_should_stop())
+			break;
 		msleep(500);
 		atomic_set(&ion_history_event, 0);
 
@@ -838,6 +841,26 @@ int ion_history_init(void)
 	return 0;
 }
 
+void ion_history_exit(void)
+{
+	if (IS_ERR_OR_NULL(ion_history_kthread))
+		goto destroy_records;
+
+	wake_up_interruptible(&ion_history_wq);
+	kthread_stop(ion_history_kthread);
+	ion_history_kthread = NULL;
+
+destroy_records:
+	if (!IS_ERR_OR_NULL(g_client_history)) {
+		history_rec_destroy(g_client_history);
+		g_client_history = NULL;
+	}
+	if (!IS_ERR_OR_NULL(g_buffer_history)) {
+		history_rec_destroy(g_buffer_history);
+		g_buffer_history = NULL;
+	}
+}
+
 void ion_history_count_kick(bool allc, size_t len)
 {
 	if (atomic_read(&ion_history_event) == 0) {
@@ -849,6 +872,11 @@ void ion_history_count_kick(bool allc, size_t len)
 int ion_history_init(void)
 {
 	return 0;
+}
+
+void ion_history_exit(void)
+{
+	/* do nothing */
 }
 
 void ion_history_count_kick(bool allc, size_t len)

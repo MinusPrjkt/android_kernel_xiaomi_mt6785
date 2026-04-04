@@ -2670,6 +2670,13 @@ EXPORT_SYMBOL(ion_device_create);
 
 void ion_device_destroy(struct ion_device *dev)
 {
+	struct ion_heap *heap, *tmp;
+
+	down_write(&dev->lock);
+	plist_for_each_entry_safe(heap, tmp, &dev->heaps, node)
+		ion_heap_cleanup(heap);
+	up_write(&dev->lock);
+
 	misc_deregister(&dev->dev);
 #if IS_ENABLED(CONFIG_DEBUG_FS)
 	debugfs_remove_recursive(dev->debug_root);

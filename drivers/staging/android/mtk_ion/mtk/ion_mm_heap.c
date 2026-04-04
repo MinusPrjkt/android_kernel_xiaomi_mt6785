@@ -1736,8 +1736,11 @@ void ion_mm_heap_destroy(struct ion_heap *heap)
 	*sys_heap = container_of(heap, struct ion_system_heap, heap);
 	int i;
 
-	for (i = 0; i < num_orders; i++)
+	for (i = 0; i < num_orders; i++) {
 		ion_page_pool_destroy(sys_heap->pools[i]);
+		ion_page_pool_destroy(sys_heap->cached_pools[i]);
+	}
+	kfree(sys_heap->cached_pools);
 	kfree(sys_heap->pools);
 	kfree(sys_heap);
 }

@@ -846,6 +846,7 @@ int ion_device_destroy_heaps(struct ion_device *dev)
 	down_write(&dev->lock);
 
 	plist_for_each_entry_safe(heap, tmp, &dev->heaps, node) {
+		ion_heap_cleanup(heap);
 		plist_del((struct plist_node *)heap, &dev->heaps);
 		ion_mtk_heap_destroy(heap);
 	}
@@ -1024,6 +1025,8 @@ int ion_drv_remove(struct platform_device *pdev)
 {
 	struct ion_device *idev = platform_get_drvdata(pdev);
 
+	ion_history_exit();
+	ion_comm_exit();
 	ion_device_destroy_heaps(idev);
 	ion_device_destroy(idev);
 	return 0;
