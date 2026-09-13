@@ -2253,7 +2253,8 @@ static void unfreeze_partials(struct kmem_cache *s,
 				new.freelist, new.counters,
 				"unfreezing slab"));
 
-		if (unlikely(!new.inuse && n->nr_partial >= s->min_partial)) {
+		if (unlikely(!new.inuse && n->nr_partial >= s->min_partial) &&
+		    !irqs_disabled()) {
 			page->next = discard_page;
 			discard_page = page;
 		} else {
