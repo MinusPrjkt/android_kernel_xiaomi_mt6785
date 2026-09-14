@@ -952,7 +952,7 @@ struct mem_cgroup *mem_cgroup_iter(struct mem_cgroup *root,
 
 		while (1) {
 			pos = READ_ONCE(iter->position);
-			if (!pos || css_tryget(&pos->css))
+			if (!pos || css_tryget_online(&pos->css))
 				break;
 			/*
 			 * css reference reached zero, so iter->position will
@@ -993,7 +993,7 @@ struct mem_cgroup *mem_cgroup_iter(struct mem_cgroup *root,
 		if (css == &root->css)
 			break;
 
-		if (css_tryget(css))
+		if (css_tryget_online(css))
 			break;
 
 		memcg = NULL;
