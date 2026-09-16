@@ -33,6 +33,7 @@
 #include <linux/slab.h>
 #include <linux/tick.h>
 #include <uapi/linux/sched/types.h>
+#include "cpufreq_schedutil.h"
 
 /**************************************************************
  * Version Information:
@@ -314,12 +315,25 @@ static unsigned int rfx_get_next_freq(struct rfx_policy *rfx_pol,
 	else
 		freq = policy->cur;
 
+#ifdef CONFIG_MTK_SCHED_EXTENSION
+	freq = map_util_freq_with_margin(util, freq, max);
+#else
 	freq = map_util_freq(util, freq, max);
+#endif
+
+#ifdef CONFIG_MTK_TINYSYS_SSPM_SUPPORT
+	freq = clamp_val(freq, policy->min, policy->max);
+#endif
 
 	if (freq == rfx_pol->cached_raw_freq && !rfx_pol->need_freq_update)
 		return rfx_pol->next_freq;
 
 	rfx_pol->cached_raw_freq = freq;
+
+#ifdef CONFIG_MTK_TINYSYS_SSPM_SUPPORT
+	return freq;
+#endif
+
 	l_freq = cpufreq_driver_resolve_freq(policy, freq);
 
 	if (!policy->freq_table)
@@ -596,6 +610,9 @@ static void rfx_update_single_freq(struct update_util_data *hook, u64 time,
 	unsigned int cached_freq = rfx_pol->cached_raw_freq;
 	unsigned long max_cap, boost, effective_util;
 	unsigned int next_f;
+#ifdef CONFIG_MTK_TINYSYS_SSPM_SUPPORT
+	int cid = arch_cpu_cluster_id(rfx_pol->policy->cpu);
+#endif
 
 	max_cap = arch_scale_cpu_capacity(NULL, rfx_c->cpu);
 
@@ -625,6 +642,12 @@ static void rfx_update_single_freq(struct update_util_data *hook, u64 time,
 		rfx_pol->cached_raw_freq = cached_freq;
 	}
 
+#ifdef CONFIG_MTK_TINYSYS_SSPM_SUPPORT
+	if (rfx_update_next_freq(rfx_pol, time, next_f)) {
+		mt_cpufreq_set_by_wfi_load_cluster(cid, next_f);
+		rfx_pol->policy->cur = next_f;
+	}
+#else
 	if (!rfx_update_next_freq(rfx_pol, time, next_f))
 		return;
 
@@ -635,6 +658,7 @@ static void rfx_update_single_freq(struct update_util_data *hook, u64 time,
 		rfx_deferred_update(rfx_pol);
 		raw_spin_unlock(&rfx_pol->update_lock);
 	}
+#endif
 }
 
 static unsigned int rfx_next_freq_shared(struct rfx_cpu *rfx_c, u64 time)
@@ -674,6 +698,9 @@ static void rfx_update_shared(struct update_util_data *hook, u64 time,
 	struct rfx_cpu *rfx_c = container_of(hook, struct rfx_cpu, update_util);
 	struct rfx_policy *rfx_pol = rfx_c->rfx_policy;
 	unsigned int next_f;
+#ifdef CONFIG_MTK_TINYSYS_SSPM_SUPPORT
+	int cid = arch_cpu_cluster_id(rfx_pol->policy->cpu);
+#endif
 
 	raw_spin_lock(&rfx_pol->update_lock);
 
@@ -685,6 +712,13 @@ static void rfx_update_shared(struct update_util_data *hook, u64 time,
 	if (rfx_should_update_freq(rfx_pol, time)) {
 		next_f = rfx_next_freq_shared(rfx_c, time);
 
+#ifdef CONFIG_MTK_TINYSYS_SSPM_SUPPORT
+		if (rfx_update_next_freq(rfx_pol, time, next_f)) {
+			next_f = mt_cpufreq_find_close_freq(cid, next_f);
+			mt_cpufreq_set_by_wfi_load_cluster(cid, next_f);
+			rfx_pol->policy->cur = next_f;
+		}
+#else
 		if (!rfx_update_next_freq(rfx_pol, time, next_f))
 			goto unlock;
 
@@ -692,6 +726,7 @@ static void rfx_update_shared(struct update_util_data *hook, u64 time,
 			cpufreq_driver_fast_switch(rfx_pol->policy, next_f);
 		else
 			rfx_deferred_update(rfx_pol);
+#endif
 	}
 unlock:
 	raw_spin_unlock(&rfx_pol->update_lock);
