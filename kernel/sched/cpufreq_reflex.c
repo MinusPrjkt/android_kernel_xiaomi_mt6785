@@ -35,6 +35,72 @@
 #include <uapi/linux/sched/types.h>
 #include "cpufreq_schedutil.h"
 
+#ifdef CONFIG_CPU_FREQ_GOV_REFLEX_NONLINEAR
+#include <mtk_upower.h>
+
+/*
+ * Pick the lowest OPP whose measured upower capacity covers @util and return
+ * its frequency, or 0 so the caller falls back to the linear mapping.
+ *
+ * mt_cpufreq_get_cpu_freq() does exactly this but is stubbed to 0 unless
+ * NONLINEAR_FREQ_CTL is set, which would also pull schedutil, arch_topology
+ * and the energy model into non-linear behaviour. Resolve through
+ * mt_cpufreq_get_freq_by_idx() instead to keep the mapping scoped to reflex.
+ *
+ * upower rows are ordered by ascending capacity while the DVFS OPP table is
+ * indexed by descending frequency (idx 0 == highest), so invert the index
+ * before the lookup. Both tables describe the same OPP set.
+ */
+static unsigned int rfx_mtk_map_util_freq(int cpu, unsigned long util)
+{
+	struct upower_tbl *tbl;
+	unsigned int cid;
+	int idx, cap, target_idx = -1;
+
+#ifdef CONFIG_MTK_SCHED_EXTENSION
+	util = util * capacity_margin / SCHED_CAPACITY_SCALE;
+#endif
+
+	tbl = upower_get_core_tbl(cpu);
+	if (!tbl)
+		return 0;
+
+	for (idx = 0; idx < tbl->row_num; idx++) {
+		cap = tbl->row[idx].cap;
+		if (!cap)
+			break;
+
+		target_idx = idx;
+
+		if (cap >= util)
+			break;
+	}
+
+	if (target_idx < 0)
+		return 0;
+
+	cid = arch_cpu_cluster_id(cpu);
+
+	return mt_cpufreq_get_freq_by_idx(cid, tbl->row_num - 1 - target_idx);
+}
+#endif /* CONFIG_CPU_FREQ_GOV_REFLEX_NONLINEAR */
+
+#ifdef CONFIG_CPU_FREQ_GOV_SCHEDUTIL
+extern void (*cpufreq_notifier_fp)(int cluster_id, unsigned long freq);
+
+static inline void rfx_cpufreq_notifier_fp(struct cpufreq_policy *policy,
+					   unsigned int next_f)
+{
+	if (cpufreq_notifier_fp)
+		cpufreq_notifier_fp(arch_cpu_cluster_id(policy->cpu), next_f);
+}
+#else
+static inline void rfx_cpufreq_notifier_fp(struct cpufreq_policy *policy,
+					   unsigned int next_f)
+{
+}
+#endif
+
 /**************************************************************
  * Version Information:
  */
@@ -310,16 +376,22 @@ static unsigned int rfx_get_next_freq(struct rfx_policy *rfx_pol,
 	unsigned int freq, l_freq, h_freq;
 	int idx;
 
-	if (arch_scale_freq_invariant())
-		freq = policy->cpuinfo.max_freq;
-	else
-		freq = policy->cur;
+	freq = 0;
+#ifdef CONFIG_CPU_FREQ_GOV_REFLEX_NONLINEAR
+	freq = rfx_mtk_map_util_freq(policy->cpu, util);
+#endif
+	if (!freq) {
+		if (arch_scale_freq_invariant())
+			freq = policy->cpuinfo.max_freq;
+		else
+			freq = policy->cur;
 
 #ifdef CONFIG_MTK_SCHED_EXTENSION
-	freq = map_util_freq_with_margin(util, freq, max);
+		freq = map_util_freq_with_margin(util, freq, max);
 #else
-	freq = map_util_freq(util, freq, max);
+		freq = map_util_freq(util, freq, max);
 #endif
+	}
 
 #ifdef CONFIG_MTK_TINYSYS_SSPM_SUPPORT
 	freq = clamp_val(freq, policy->min, policy->max);
@@ -646,6 +718,7 @@ static void rfx_update_single_freq(struct update_util_data *hook, u64 time,
 	if (rfx_update_next_freq(rfx_pol, time, next_f)) {
 		mt_cpufreq_set_by_wfi_load_cluster(cid, next_f);
 		rfx_pol->policy->cur = next_f;
+		rfx_cpufreq_notifier_fp(rfx_pol->policy, next_f);
 	}
 #else
 	if (!rfx_update_next_freq(rfx_pol, time, next_f))
@@ -658,6 +731,7 @@ static void rfx_update_single_freq(struct update_util_data *hook, u64 time,
 		rfx_deferred_update(rfx_pol);
 		raw_spin_unlock(&rfx_pol->update_lock);
 	}
+	rfx_cpufreq_notifier_fp(rfx_pol->policy, next_f);
 #endif
 }
 
@@ -717,6 +791,7 @@ static void rfx_update_shared(struct update_util_data *hook, u64 time,
 			next_f = mt_cpufreq_find_close_freq(cid, next_f);
 			mt_cpufreq_set_by_wfi_load_cluster(cid, next_f);
 			rfx_pol->policy->cur = next_f;
+			rfx_cpufreq_notifier_fp(rfx_pol->policy, next_f);
 		}
 #else
 		if (!rfx_update_next_freq(rfx_pol, time, next_f))
@@ -726,6 +801,7 @@ static void rfx_update_shared(struct update_util_data *hook, u64 time,
 			cpufreq_driver_fast_switch(rfx_pol->policy, next_f);
 		else
 			rfx_deferred_update(rfx_pol);
+		rfx_cpufreq_notifier_fp(rfx_pol->policy, next_f);
 #endif
 	}
 unlock:
