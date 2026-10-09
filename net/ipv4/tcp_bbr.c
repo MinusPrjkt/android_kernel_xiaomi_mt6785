@@ -178,12 +178,15 @@ struct bbr {
 		initialized:1;	       /* has bbr_init() been called? */
 	u32	alpha_last_delivered;	 /* tp->delivered    at alpha update */
 	u32	alpha_last_delivered_ce; /* tp->delivered_ce at alpha update */
+	u16	round_losses;		/* losses in this round trip */
+	u16	round_max_inflight;	/* max inflight this round trip */
 
 	u8	unused_4;		/* to preserve alignment */
 };
 
 struct bbr_context {
 	u32 sample_bw;
+	int ce_ratio;	/* round-window delivered_ce/delivered << BBR_SCALE; -1 = n/a */
 };
 
 /* Window length of min_rtt filter (in sec): */
@@ -337,6 +340,28 @@ static bool bbr_can_use_ecn(const struct sock *sk)
 	return !!(tcp_sk(sk)->ecn_flags & TCP_ECN_OK);
 }
 
+/* Track ECN signals per-ACK from cumulative counters (no rs->delivered_ce
+ * in 4.19). Baseline advanced only at round start by bbr_update_ecn_alpha().
+ */
+static void bbr_track_ecn_signals(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct bbr *bbr = inet_csk_ca(sk);
+	s32 delivered, delivered_ce;
+
+	if (!bbr->ecn_eligible)
+		return;
+
+	delivered = tp->delivered - bbr->alpha_last_delivered;
+	delivered_ce = tp->delivered_ce - bbr->alpha_last_delivered_ce;
+
+	if (delivered <= 0 || delivered_ce < 0)
+		return;
+
+	bbr->ecn_in_round |= (delivered_ce > 0);
+	bbr->ecn_in_cycle |= (delivered_ce > 0);
+}
+
 static int bbr_update_ecn_alpha(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -362,9 +387,6 @@ static int bbr_update_ecn_alpha(struct sock *sk)
 		      "BBR ECN alpha: delivered=%d delivered_ce=%d\n",
 		      delivered, delivered_ce))
 		return -1;
-
-	bbr->ecn_in_round |= (delivered_ce > 0);
-	bbr->ecn_in_cycle |= (delivered_ce > 0);
 
 	ce_ratio = (u64)delivered_ce << BBR_SCALE;
 	do_div(ce_ratio, delivered);
@@ -476,6 +498,10 @@ static void bbr_init_pacing_rate_from_rtt(struct sock *sk)
 
 	if (tp->srtt_us) {		/* any RTT sample yet? */
 		rtt_us = max(tp->srtt_us >> 3, 1U);
+		/* Clamp first RTT sample to 100ms (outliers from delayed
+		 * ACK/Wi-Fi PS would poison pacing rate).
+		 */
+		rtt_us = min_t(u32, rtt_us, 100 * USEC_PER_MSEC);
 		bbr->has_seen_rtt = 1;
 	} else {			 /* no RTT sample yet */
 		rtt_us = USEC_PER_MSEC;	 /* use nominal default RTT */
@@ -496,6 +522,8 @@ static void bbr_set_pacing_rate(struct sock *sk, u32 bw, int gain)
 
 	if (unlikely(!bbr->has_seen_rtt && tp->srtt_us))
 		bbr_init_pacing_rate_from_rtt(sk);
+	/* Floor pacing rate to 100 KB/s (zero rate would stall fq). */
+	rate = max_t(unsigned long, rate, 100 * 1024);
 	if (bbr_full_bw_reached(sk) || rate > READ_ONCE(sk->sk_pacing_rate))
 		WRITE_ONCE(sk->sk_pacing_rate, rate);
 }
@@ -1121,16 +1149,24 @@ static void bbr_probe_inflight_hi_upward(struct sock *sk,
  * and in PROBE_UP.
  */
 static bool bbr_is_inflight_too_high(const struct sock *sk,
-				      const struct rate_sample *rs)
+				      const struct rate_sample *rs,
+				      struct bbr_context *ctx)
 {
+	struct bbr *bbr = inet_csk_ca(sk);
 	u32 loss_thresh;
 
-	if (rs->losses > 0 && rs->prior_in_flight) {
-		loss_thresh = (u64)rs->prior_in_flight * bbr_param(sk, loss_thresh) >>
-				BBR_SCALE;
-		if (rs->losses > loss_thresh) {
+	/* 4.19: use round-window CE ratio (no per-ACK delivered_ce). */
+	if (bbr->ecn_eligible && !!bbr_param(sk, ecn_thresh) &&
+	    ctx->ce_ratio >= 0 &&
+	    (u32)ctx->ce_ratio >= bbr_param(sk, ecn_thresh))
+		return true;
+
+	/* 4.19: windowed loss rate (rs->losses is per-ACK). */
+	if (bbr->round_losses > 0 && bbr->round_max_inflight) {
+		loss_thresh = (u64)bbr->round_max_inflight *
+				bbr_param(sk, loss_thresh) >> BBR_SCALE;
+		if (bbr->round_losses > loss_thresh)
 			return true;
-		}
 	}
 
 	return false;
@@ -1369,8 +1405,14 @@ static void bbr_update_congestion_signals(
 		bbr_take_max_bw_sample(sk, bw);
 
 	bbr->loss_in_round |= (rs->losses > 0);
-	if (rs->losses > 0)
+	bbr->round_max_inflight = min_t(u32, U16_MAX,
+					max_t(u32, bbr->round_max_inflight, rs->prior_in_flight));
+	if (rs->losses > 0) {
 		bbr->loss_in_cycle = 1;
+		/* Accumulate per-ACK losses over the round trip. */
+		bbr->round_losses = min_t(u32, bbr->round_losses + rs->losses,
+					  U16_MAX);
+	}
 
 	if (!bbr->loss_round_start)
 		return;
@@ -1568,7 +1610,7 @@ static bool bbr_adapt_upper_bounds(struct sock *sk,
 			return true;  /* yes, decided state transition */
 		}
 	}
-	if (bbr_is_inflight_too_high(sk, rs)) {
+	if (bbr_is_inflight_too_high(sk, rs, ctx)) {
 		if (bbr->bw_probe_samples)  /*  sample is from bw probing? */
 			bbr_handle_inflight_too_high(sk, rs);
 	} else {
@@ -1580,9 +1622,8 @@ static bool bbr_adapt_upper_bounds(struct sock *sk,
 		/* To be resilient to random loss, we must raise bw/inflight_hi
 		 * if we observe in any phase that a higher level is safe.
 		 */
-		if (rs->prior_in_flight > bbr->inflight_hi) {
+		if (rs->prior_in_flight > bbr->inflight_hi)
 			bbr->inflight_hi = rs->prior_in_flight;
-		}
 
 		if (bbr->mode == BBR_PROBE_BW &&
 		    bbr->cycle_idx == BBR_BW_PROBE_UP)
@@ -1772,7 +1813,8 @@ static void bbr_exit_probe_rtt(struct sock *sk)
  * have been lost, and how many we need to drain with a low pacing rate.
  */
 static void bbr_check_loss_too_high_in_startup(struct sock *sk,
-						const struct rate_sample *rs)
+						const struct rate_sample *rs,
+						struct bbr_context *ctx)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
 
@@ -1789,7 +1831,7 @@ static void bbr_check_loss_too_high_in_startup(struct sock *sk,
 	if (bbr_param(sk, full_loss_cnt) && bbr->loss_round_start &&
 	    inet_csk(sk)->icsk_ca_state == TCP_CA_Recovery &&
 	    bbr->loss_events_in_round >= bbr_param(sk, full_loss_cnt) &&
-	    bbr_is_inflight_too_high(sk, rs)) {
+	    bbr_is_inflight_too_high(sk, rs, ctx)) {
 		bbr_handle_queue_too_high_in_startup(sk);
 		return;
 	}
@@ -1812,7 +1854,8 @@ static void bbr_check_full_bw_reached(struct sock *sk,
 	struct bbr *bbr = inet_csk_ca(sk);
 	u32 bw_thresh, full_cnt, thresh;
 
-	if (bbr->full_bw_now || rs->is_app_limited)
+	/* Skip invalid samples (interval_us <= 0 carry no bw info). */
+	if (bbr->full_bw_now || rs->is_app_limited || rs->interval_us <= 0)
 		return;
 
 	thresh = bbr_param(sk, full_bw_thresh);
@@ -1859,7 +1902,7 @@ static void bbr_update_model(struct sock *sk, const struct rate_sample *rs,
 {
 	bbr_update_congestion_signals(sk, rs, ctx);
 	bbr_update_ack_aggregation(sk, rs);
-	bbr_check_loss_too_high_in_startup(sk, rs);
+	bbr_check_loss_too_high_in_startup(sk, rs, ctx);
 	bbr_check_full_bw_reached(sk, rs, ctx);
 	bbr_check_drain(sk, rs, ctx);
 	bbr_update_cycle_phase(sk, rs, ctx);
@@ -1921,18 +1964,24 @@ static void bbr_main(struct sock *sk, const struct rate_sample *rs)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bbr *bbr = inet_csk_ca(sk);
-	struct bbr_context ctx = { 0 };
+	struct bbr_context ctx = { .ce_ratio = -1 };
 	bool update_model = true;
 	u32 bw;
+
+	if (!bbr->initialized)
+		return;
 
 	bbr_update_round_start(sk, rs, &ctx);
 	if (bbr->round_start) {
 		bbr->rounds_since_probe =
 			min_t(s32, bbr->rounds_since_probe + 1, 0xFF);
+		ctx.ce_ratio = bbr_update_ecn_alpha(sk);
+		bbr->round_losses = 0;
+		bbr->round_max_inflight = 0;
 	}
 	bbr_calculate_bw_sample(sk, rs, &ctx);
 	bbr_update_latest_delivery_signals(sk, rs, &ctx);
-	bbr_update_ecn_alpha(sk);
+	bbr_track_ecn_signals(sk);
 
 	if (bbr_run_fast_path(sk, &update_model, rs, &ctx))
 		goto out;
@@ -2027,12 +2076,17 @@ static void bbr_init(struct sock *sk)
 	bbr->ecn_alpha = bbr_param(sk, ecn_alpha_init);
 	bbr->alpha_last_delivered = 0;
 	bbr->alpha_last_delivered_ce = 0;
+	bbr->round_losses = 0;
+	bbr->round_max_inflight = 0;
 }
 
 /* Revert short-term model if current loss recovery event was spurious. */
 static u32 bbr_undo_cwnd(struct sock *sk)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
+
+	if (!bbr->initialized)
+		return tcp_sk(sk)->snd_cwnd;
 
 	bbr_reset_full_bw(sk); /* spurious slow-down; reset full bw detector */
 	bbr->loss_in_round = 0;
@@ -2049,6 +2103,9 @@ static u32 bbr_undo_cwnd(struct sock *sk)
 static u32 bbr_ssthresh(struct sock *sk)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
+
+	if (!bbr->initialized)
+		return tcp_sk(sk)->snd_ssthresh;
 
 	bbr_save_cwnd(sk);
 	/* For undo, save state that adapts based on loss signal. */
@@ -2124,6 +2181,9 @@ static void bbr_set_state(struct sock *sk, u8 new_state)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bbr *bbr = inet_csk_ca(sk);
+
+	if (!bbr->initialized)
+		return;
 
 	if (new_state == TCP_CA_Loss) {
 
