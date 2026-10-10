@@ -783,17 +783,13 @@ static int fq_resize(struct Qdisc *sch, u32 log)
 	return 0;
 }
 
-static struct netlink_range_validation iq_range = {
-	.max = INT_MAX,
-};
-
 static const struct nla_policy fq_policy[TCA_FQ_MAX + 1] = {
 	[TCA_FQ_UNSPEC]			= { .strict_start_type = TCA_FQ_TIMER_SLACK },
 
 	[TCA_FQ_PLIMIT]			= { .type = NLA_U32 },
 	[TCA_FQ_FLOW_PLIMIT]		= { .type = NLA_U32 },
 	[TCA_FQ_QUANTUM]		= { .type = NLA_U32 },
-	[TCA_FQ_INITIAL_QUANTUM]	= NLA_POLICY_FULL_RANGE(NLA_U32, &iq_range),
+	[TCA_FQ_INITIAL_QUANTUM]	= { .type = NLA_U32 },
 	[TCA_FQ_RATE_ENABLE]		= { .type = NLA_U32 },
 	[TCA_FQ_FLOW_DEFAULT_RATE]	= { .type = NLA_U32 },
 	[TCA_FQ_FLOW_MAX_RATE]		= { .type = NLA_U32 },
@@ -822,6 +818,12 @@ static int fq_change(struct Qdisc *sch, struct nlattr *opt,
 	err = nla_parse_nested(tb, TCA_FQ_MAX, opt, fq_policy, NULL);
 	if (err < 0)
 		return err;
+
+	if (tb[TCA_FQ_INITIAL_QUANTUM] &&
+	    nla_get_u32(tb[TCA_FQ_INITIAL_QUANTUM]) > INT_MAX) {
+		NL_SET_ERR_MSG_MOD(extack, "initial quantum out of range");
+		return -ERANGE;
+	}
 
 	sch_tree_lock(sch);
 
