@@ -522,8 +522,6 @@ static void bbr_set_pacing_rate(struct sock *sk, u32 bw, int gain)
 
 	if (unlikely(!bbr->has_seen_rtt && tp->srtt_us))
 		bbr_init_pacing_rate_from_rtt(sk);
-	/* Floor pacing rate to 100 KB/s (zero rate would stall fq). */
-	rate = max_t(unsigned long, rate, 100 * 1024);
 	if (bbr_full_bw_reached(sk) || rate > READ_ONCE(sk->sk_pacing_rate))
 		WRITE_ONCE(sk->sk_pacing_rate, rate);
 }
