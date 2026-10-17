@@ -262,20 +262,6 @@ config CPU_FREQ_GOV_REFLEX
 
 	  If in doubt, say N.
 
-config CPU_FREQ_GOV_REFLEX_NONLINEAR
-	bool "Non-linear util-to-frequency mapping for reflex governor"
-	depends on CPU_FREQ_GOV_REFLEX && MTK_UNIFY_POWER
-	help
-	  Map scheduler utilization to frequency using MediaTek's measured
-	  per-OPP capacity tables (upower) instead of the linear assumption
-	  that capacity scales proportionally with frequency.
-
-	  This only affects the reflex governor. It does not enable the
-	  system-wide NONLINEAR_FREQ_CTL, so schedutil, arch_topology and
-	  the energy model keep their default linear behaviour.
-
-	  If in doubt, say N.
-
 comment "CPU frequency scaling drivers"
 
 config CPUFREQ_DT
