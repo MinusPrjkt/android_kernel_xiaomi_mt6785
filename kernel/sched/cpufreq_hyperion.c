@@ -1025,7 +1025,7 @@ static struct kobj_type hyp_tunables_ktype = {
 
 /********************** cpufreq governor interface *********************/
 
-static struct cpufreq_governor hyperion_gov;
+struct cpufreq_governor hyperion_gov;
 
 static struct hyp_policy *hyp_policy_alloc(struct cpufreq_policy *policy)
 {
@@ -1311,7 +1311,7 @@ static void hyp_limits(struct cpufreq_policy *policy)
 	WRITE_ONCE(hyp_pol->limits_changed, true);
 }
 
-static struct cpufreq_governor hyperion_gov = {
+struct cpufreq_governor hyperion_gov = {
 	.name			= "hyperion",
 	.owner			= THIS_MODULE,
 	.dynamic_switching	= true,
